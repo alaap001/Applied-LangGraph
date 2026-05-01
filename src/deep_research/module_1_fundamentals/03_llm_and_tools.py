@@ -18,8 +18,35 @@ What you'll learn here:
     * The difference vs. "tool-calling agents" where the LLM picks the tool
       (we'll use that pattern later for the Searcher agent)
 
-Graph shape:
-    START -> planner (LLM) -> searcher (Tavily) -> summarizer (LLM) -> END
+Graph topology (mermaid):
+
+    ```mermaid
+    flowchart LR
+        S([START]) --> P[planner<br/>Gemini + structured output]
+        P --> SE[searcher<br/>Tavily search]
+        SE --> SU[summarizer<br/>Gemini free-form]
+        SU --> E([END])
+    ```
+
+How structured output works (concept):
+
+    ```mermaid
+    flowchart LR
+        Pyd["Pydantic model<br/>SubQuestions"] --> JS["JSON schema"]
+        JS --> LLM["Gemini<br/>(function-calling mode)"]
+        UQ["User prompt"] --> LLM
+        LLM --> RAW["JSON output"]
+        RAW --> INST["SubQuestions instance<br/>typed Python object"]
+    ```
+
+Tool wiring in a node (Stage 5 pattern - direct call, NOT LLM-driven):
+
+    ```mermaid
+    flowchart LR
+        N["searcher_node"] -->|"tavily.invoke({query: ...})"| T["TavilySearch tool"]
+        T -->|"REST API"| Tavily[(Tavily server)]
+        Tavily --> T --> N
+    ```
 
 This is the same shape as Stage 2/3, but every node now does real work.
 ============================================================================

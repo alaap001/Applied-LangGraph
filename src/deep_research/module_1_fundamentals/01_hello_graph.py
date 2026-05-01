@@ -1,11 +1,32 @@
 """
+============================================================================
 Stage 1: The smallest possible LangGraph program.
+============================================================================
 
 Goal: Understand the 4 building blocks of every LangGraph app:
     1. State    - the shared "whiteboard" all nodes read/write
     2. Nodes    - plain functions that take state and return updates
     3. Edges    - rules that say "go to this node next"
     4. Compile  - turn the blueprint into a runnable graph
+
+Graph topology (mermaid):
+
+    ```mermaid
+    flowchart LR
+        S([START]) --> echo[echo_node]
+        echo --> E([END])
+    ```
+
+State flow (one node, two snapshots):
+
+    ```mermaid
+    flowchart TB
+        S1["INITIAL<br/>query: 'What is the capital of France?'<br/>response: ''"]
+        N["echo_node<br/>returns {response: 'You asked: ...'}"]
+        S2["FINAL<br/>query: 'What is the capital of France?'<br/>response: 'You asked: ...'"]
+        S1 --> N --> S2
+    ```
+============================================================================
 """
 
 from typing import TypedDict

@@ -1,5 +1,7 @@
 """
-Stage 2 + Stage 3 combined:
+============================================================================
+Stage 2 + Stage 3 combined: Reducers + multi-node graphs
+============================================================================
 
 Stage 2: REDUCERS
     - How do we let nodes APPEND to a list instead of OVERWRITING it?
@@ -10,6 +12,46 @@ Stage 3: MULTIPLE NODES
     - The planner writes sub_questions; the summarizer reads them.
     - This is the same shape as the real Planner -> Orchestrator handoff
       we'll build later, just without the LLM.
+
+Graph topology (mermaid):
+
+    ```mermaid
+    flowchart LR
+        S([START]) --> P[planner_node]
+        P --> SU[summarizer_node]
+        SU --> E([END])
+    ```
+
+What a reducer does (concept diagram):
+
+    ```mermaid
+    flowchart TB
+        subgraph NoReducer["WITHOUT reducer<br/>(default = overwrite)"]
+            A1["state.findings = ['x']"]
+            A2["node returns {findings: ['y']}"]
+            A3["state.findings = ['y']<br/>'x' is LOST"]
+            A1 --> A2 --> A3
+        end
+        subgraph WithReducer["WITH Annotated[list, add]<br/>(concatenate)"]
+            B1["state.findings = ['x']"]
+            B2["node returns {findings: ['y']}"]
+            B3["state.findings = ['x', 'y']<br/>both kept"]
+            B1 --> B2 --> B3
+        end
+    ```
+
+Field-level merge strategy (which fields use which reducer):
+
+    ```mermaid
+    flowchart LR
+        subgraph State[ResearchState]
+            Q["query: str<br/>(overwrite)"]
+            SQ["sub_questions: list<br/>(add = concat)"]
+            F["findings: list<br/>(add = concat)"]
+            FS["final_summary: str<br/>(overwrite)"]
+        end
+    ```
+============================================================================
 """
 
 from typing import TypedDict, Annotated
