@@ -156,7 +156,6 @@ class SubQuestions(BaseModel):
 # returns a SubQuestions instance, not a string.
 planner_llm = llm.with_structured_output(SubQuestions)
 
-
 # ---------------------------------------------------------------------------
 # 5. NODE: PLANNER (real LLM call w/ structured output)
 # ---------------------------------------------------------------------------
