@@ -116,7 +116,7 @@ load_dotenv()
 assert os.getenv("GOOGLE_API_KEY"), "GOOGLE_API_KEY missing from .env"
 assert os.getenv("TAVILY_API_KEY"), "TAVILY_API_KEY missing from .env"
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview")
 tavily = TavilySearch(max_results=4, search_depth="basic")
 
 
@@ -300,6 +300,7 @@ outer.add_edge("synthesize", END)
 
 graph = outer.compile()
 
+graph.get_graph().draw_mermaid_png(output_file_path="src/deep_research/module_2_control_flow/07_subgraphs.png")
 
 # ---------------------------------------------------------------------------
 # 7. RUN

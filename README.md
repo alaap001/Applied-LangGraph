@@ -16,7 +16,7 @@ The path is split into **6 modules** of increasing complexity. You don't need to
 | **I. LangGraph Fundamentals** | The graph runtime | 1–5 | A linear LLM + tool pipeline |
 | **II. Graph Control Flow** | Parallelism, branching, cycles, subgraphs | 6–9 | A multi-step agent with loops |
 | **III. Agent Patterns** | ReAct, streaming, human-in-the-loop, time travel | 10–13 | A real interactive tool-using agent |
-| **IV. Memory & RAG** | Embeddings, Qdrant, RAG, Self-RAG, Agentic RAG, long-term memory | 14–19 | A research agent that learns over time |
+| **IV. Memory & RAG** | Embeddings, Qdrant, RAG, Self-RAG, Agentic RAG, long-term memory | 14–19 ✅ | A research agent that learns over time |
 | **V. Multi-Agent Systems** | Supervisor, network, handoffs, observability, cost control | 20–24 | Coordinated specialist agents |
 | **VI. Capstone** | The Deep Research Agent Swarm | 25+ | The full system in [`PROJECT2_PLAN.md`](PROJECT2_PLAN.md) |
 
@@ -62,10 +62,10 @@ The user explicitly asked for these. RAG belongs here because once an agent has 
 |---|---|---|---|
 | 14 | [`qdrant_basics.py`](src/deep_research/module_4_memory_and_rag/12_qdrant_basics.py) | Embeddings 101 (`gemini-embedding-001`), Qdrant collections, upsert + search, metadata filters — *no LangChain*, just the raw client | ✅ |
 | 15 | [`naive_rag.py`](src/deep_research/module_4_memory_and_rag/13_naive_rag.py) | Classic 2-node RAG in LangGraph: retrieve → generate. Tagged-chunk prompt-injection defense. Citations by `source_id`. | ✅ |
-| 16 | `better_rag.py` | Query rewriting, chunking strategies, metadata filtering, hybrid search (dense + BM25), reranking | 📋 |
-| 17 | `self_rag.py` | Self-RAG / CRAG: grade each retrieved doc, decide whether to re-search, regenerate query if needed — a *graph-shaped* RAG pipeline that beats one-shot RAG handily | 📋 |
-| 18 | `agentic_rag.py` | The LLM itself decides *whether* to retrieve and *what* to retrieve, using the retriever as a tool. The bridge between RAG and full agents. | 📋 |
-| 19 | `long_term_memory.py` | LangGraph's `BaseStore`, `InMemoryStore` → `PostgresStore`. Cross-thread memory (user prefs, learned facts). Then mem0 as a managed alternative. | 📋 |
+| 16 | [`better_rag.py`](src/deep_research/module_4_memory_and_rag/14_better_rag.py) | Query rewriting (LLM expansion), hybrid search (dense + BM25 + RRF), LLM cross-encoder reranker | ✅ |
+| 17 | [`self_rag.py`](src/deep_research/module_4_memory_and_rag/15_self_rag.py) | Self-RAG / CRAG: grade each retrieved doc, decide whether to re-search, regenerate query if needed — a *graph-shaped* RAG pipeline that beats one-shot RAG handily | ✅ |
+| 18 | [`agentic_rag.py`](src/deep_research/module_4_memory_and_rag/16_agentic_rag.py) | The LLM itself decides *whether* to retrieve and *what* to retrieve, using the retriever as a tool. The bridge between RAG and full agents. | ✅ |
+| 19 | [`long_term_memory.py`](src/deep_research/module_4_memory_and_rag/17_long_term_memory.py) | LangGraph's `BaseStore` (`InMemoryStore` → `PostgresStore`), `InjectedStore`, `pre_model_hook` for memory injection. Per-user namespaces. mem0 mapped onto the same shape. | ✅ |
 
 ### Module V — Multi-Agent Systems
 
@@ -650,6 +650,250 @@ def generate_node(state):
 
 ---
 
+### Stage 16 — Better RAG: rewriting, hybrid search, reranking ([`14_better_rag.py`](src/deep_research/module_4_memory_and_rag/14_better_rag.py))
+
+Three orthogonal upgrades on top of naive RAG, each fixing one of Stage 15's failure modes. None touch the corpus or the embeddings — they all sit either before or after retrieval. You can comment any of them out and see how the answers degrade.
+
+```
+START → rewrite → hybrid_retrieve → rerank → generate → END
+```
+
+**1. Query rewriting (pre-retrieval).** A small LLM call expands one vague user question into 2–3 sharper standalone queries — different vocabulary, different angles. The original is always kept first as the safety net.
+
+```python
+class RewrittenQueries(BaseModel):
+    queries: list[str]  # standalone search prompts, not paraphrases
+
+def rewrite_query(q: str) -> list[str]:
+    out = llm.with_structured_output(RewrittenQueries).invoke(REWRITE_PROMPT.format(q=q))
+    return [q] + [r for r in out.queries if r.strip()]
+```
+
+**2. Hybrid search + RRF (during retrieval).** Per query, run BOTH dense (cosine on `gemini-embedding-001`) AND sparse (BM25 via `rank_bm25`) retrieval, then fuse all the ranked lists with **Reciprocal Rank Fusion**:
+
+```
+score(doc) = Σ over rankers of  1 / (60 + rank_in_that_ranker)
+```
+
+Why RRF is the right tool: it doesn't need calibrated scores from either ranker — just ranks. Cosine and BM25 are on completely different scales, but their *rankings* are comparable. RRF is robust, hyperparameter-free (`k=60` is the literature default), and trivial to extend with more rankers.
+
+| Catches | Strength |
+|---|---|
+| Synonyms, paraphrases ("fan out" ≈ "parallel workers") | Dense embeddings |
+| Exact terms, code identifiers ("Send API", "MemorySaver") | BM25 sparse |
+
+**3. LLM cross-encoder reranking (post-retrieval).** Embeddings are a *bi-encoder* — they encode query and chunk separately and compare vectors. Fast (corpus is embedded once), but the query and chunk never see each other. A *cross-encoder* (or an LLM doing the same job) scores `(query, chunk)` jointly:
+
+```python
+class RerankItem(BaseModel):
+    source_id: str
+    score: int = Field(ge=0, le=10)
+    why: str
+
+def rerank_with_llm(query, candidates, top_n=4) -> list[dict]:
+    out = llm.with_structured_output(RerankResult).invoke(
+        RERANK_PROMPT.format(q=query, chunks=tagged_blocks(candidates))
+    )
+    # join scores back to candidates, sort desc, keep top_n
+```
+
+The standard pattern is "wide net, then narrow": fetch ~20 candidates with hybrid retrieval, rerank to keep the best 4. In production you'd swap the LLM for Cohere Rerank or BGE-reranker-v2 — same interface, smaller/faster model.
+
+**Key takeaway:** the trio of upgrades attacks three different failure modes (vague query → rewriting; lexical mismatch → hybrid; topical-but-wrong order → rerank) and they compose cleanly. The capstone's mem0 lookups (`subq_cache`, `facts`) will use exactly this pipeline; the user's question is rewritten into multiple retrieval angles before hitting the cache.
+
+---
+
+### Stage 17 — Self-RAG: graded retrieval & re-search loop ([`15_self_rag.py`](src/deep_research/module_4_memory_and_rag/15_self_rag.py))
+
+Stage 16 retrieves better, but it still **always answers** — even when the chunks don't actually contain the facts. Self-RAG adds a critic LLM that grades each retrieval on two axes (relevance + support) and either passes, loops back to re-retrieve with an aggressive rewrite, or **abstains** explicitly.
+
+This is the **Stage 8 critic-loop pattern applied to the RAG domain.** Same `Command(goto=..., update=...)` machinery, same termination invariants, same `MAX_ROUNDS = 2` cap from `PROJECT2_PLAN.md`.
+
+```
+                    ┌──────────────── (loop, +1 round) ───────────────┐
+                    │                                                  │
+   START → rewrite → retrieve → grade  ─── sufficient ──→ generate → END
+                              │
+                              └─── insufficient + budget exhausted ──→ abstain → END
+```
+
+**The critic returns a structured verdict:**
+
+```python
+class GradeVerdict(BaseModel):
+    relevance_avg:   float = Field(ge=0, le=10)   # avg how-on-topic
+    supports_answer: bool                          # do chunks contain the facts?
+    missing:         str                           # one-line note for next rewrite
+```
+
+**The decision logic** (lives in a `Command`-returning grade node — no `add_conditional_edges` needed):
+
+```python
+def grade_node(state) -> Command[Literal["rewrite", "generate", "abstain"]]:
+    verdict = grade_retrieval(state["query"], state["top_chunks"])
+
+    if verdict.supports_answer and verdict.relevance_avg >= MIN_RELEVANCE:
+        return Command(goto="generate", update={"grade": ...})
+
+    if state["round_idx"] + 1 > MAX_ROUNDS:
+        return Command(goto="abstain", update={"grade": ...})
+
+    return Command(
+        goto="rewrite",
+        update={"grade": ..., "round_idx": state["round_idx"] + 1},
+    )
+```
+
+**Round-aware rewriting.** The first round uses Stage 16's normal rewrite prompt. On retry, an *aggressive* rewrite prompt is fed the previous queries and the critic's `missing` note, and is told to try different vocabulary, break the question into sub-questions, or guess the corpus's actual terms.
+
+**Why `abstain` is its own node, not just text in `generate`:**
+
+- It's a first-class outcome in eval traces (you can grep for it).
+- It's the right place to fall back to a different strategy (web search, escalate to a more expensive model, queue for "needs more docs").
+- It enforces the single most important property of a good RAG system: *answer or don't, but never confidently fabricate.*
+
+**Termination invariants** (always check these for any cyclic graph):
+
+- Every path from `grade` either terminates (`generate` / `abstain`) or *strictly increments* the round counter.
+- `MAX_ROUNDS` is a hard ceiling — even if the critic insists, we stop. Belt-and-braces, same as `PROJECT2_PLAN.md`.
+- The state carries `history` breadcrumbs so debugging a long loop is one print away.
+
+**Key takeaway:** cycles in graphs are how you get *self-correcting* retrieval. The exact same pattern shows up in the capstone's Critic node grading sufficiency every N sub-questions — the only difference is the unit being graded (whole findings, not chunks) and the loop body (dispatching more Searchers, not rewriting one query). Master this in 80 lines here, scale it up there.
+
+---
+
+### Stage 18 — Agentic RAG: retriever-as-tool ([`16_agentic_rag.py`](src/deep_research/module_4_memory_and_rag/16_agentic_rag.py))
+
+Stages 15–17 all assume retrieval runs **on every query**. Stage 18 flips the control flow: the retriever becomes a `@tool` and the LLM decides if/when/with-what to call it. This is the bridge between "RAG" and "full agent" — and structurally it's just Stage 12's prebuilt ReAct agent with two carefully-written tools.
+
+```
+START → agent ↔ tools (retrieve_kb / lookup_by_topic) → END
+```
+
+**The two tools:**
+
+```python
+@tool
+def retrieve_kb(query: str, top_n: int = 4) -> str:
+    """Search the internal knowledge base for chunks relevant to `query`.
+    USE THIS WHEN: ...
+    DO NOT USE FOR: ...
+    Returns: tagged <retrieved_chunk source_id="..."> blocks with
+    rerank_score visible. Cite by source_id like [lg-02].
+    """
+    chunks = _hybrid_search_and_rerank(query, top_n=top_n)
+    return tagged_blocks(chunks)
+
+@tool
+def lookup_by_topic(topic: str) -> str:
+    """List ALL chunks tagged with a specific topic, no semantic search.
+    USE THIS WHEN: exhaustive coverage of a known topic.
+    Available topics: langgraph, qdrant, rag, agents, embeddings."""
+```
+
+**Two design rules this file establishes:**
+
+1. **Tool docstrings ARE prompts.** The LLM picks tools based on the docstring alone. Write them like a function spec for a careful colleague: when to use, when NOT to use, argument semantics, return shape.
+2. **Tools return strings, not Python objects.** The LLM only sees `ToolMessage.content`. Format as tagged blocks with `source_id` and `rerank_score` visible so the model can cite AND self-assess "did I get a good hit?".
+
+**The system prompt encodes three policies you'll always need in agentic-RAG:**
+
+- **When to retrieve vs answer directly** — "for trivial / off-topic, ANSWER DIRECTLY; for KB-relevant, CALL `retrieve_kb`."
+- **Citation discipline** — "after every factual sentence, append [source_id]; only cite source_ids that appeared in tool results."
+- **Abstention** — "if every chunk has rerank_score < 6, say plainly the KB doesn't cover this. Do NOT invent."
+
+**Behaviour you'll see at runtime:**
+
+| Question | Tool calls |
+|---|---|
+| "What's 2 + 2?" | 0 |
+| "How does LangGraph fan out parallel workers?" | 1 (`retrieve_kb`) |
+| "Compare LangGraph parallelism vs cycles." | 2 (`retrieve_kb` per side) |
+| "Boiling point of mercury?" | 0 or 1 (often retrieves, sees weak hits, abstains) |
+
+**Key takeaway:** this file IS the capstone Searcher's shape. Add `mem0_read` and `tavily_search` to `TOOLS` and you have ~60% of `PROJECT2_PLAN.md` sec 5 already in your hand.
+
+---
+
+### Stage 19 — Long-term memory: `BaseStore` and mem0 ([`17_long_term_memory.py`](src/deep_research/module_4_memory_and_rag/17_long_term_memory.py))
+
+Every agent so far has been amnesiac across sessions. Stage 13's `MemorySaver` was the exception — it persists ONE thread for resume / replay — but checkpointers are per-thread by design. They don't cover cross-session needs:
+
+- *"remember Alaap prefers concise, technical answers"*
+- *"we already retrieved this fact 5 minutes ago — reuse it"*
+- *"this user has a project called 'capstone-swarm'"*
+
+That's what **`BaseStore`** is for. The two-layer memory model every production agent uses:
+
+| | Stage 13 — Checkpointer | Stage 19 — Store |
+|---|---|---|
+| Scope | one thread of one session | spans threads & sessions |
+| Unit | full graph state | freeform key-value items |
+| Indexed by | `thread_id` | namespace tuple |
+| Enables | resume, replay, time travel | user prefs, learned facts, cache, mem0 |
+| Backends | `MemorySaver` → `SqliteSaver` → `AsyncPostgresSaver` | `InMemoryStore` → `PostgresStore` → custom (mem0) |
+
+**The three operations you'll use 99% of the time:**
+
+```python
+store.put(namespace, key, value)            # upsert one item
+store.get(namespace, key)                   # exact-key lookup
+store.search(namespace, query=..., limit=)  # semantic search
+```
+
+`namespace` is a **tuple** — typically `(category, user_id)` so each user has isolated memory. With `index={"embed": fn, "dims": ..., "fields": [...]}` at construction, `store.search(query=...)` becomes semantic; without it, only metadata filters.
+
+**The three namespaces from `PROJECT2_PLAN.md` sec 3 D2:**
+
+```
+("prefs",      user_id) -> {citation_style, depth, ...}
+("subq_cache", user_id) -> {q -> top_chunks, ts}
+("facts",      user_id) -> {claim, sources, trust}
+```
+
+**Wiring memory into the agent — three new primitives:**
+
+1. **`store=` at `create_react_agent`** — plumbs the store into every tool that asks for it.
+2. **`InjectedStore` in tool args** — lets a tool receive the runtime store without exposing it to the LLM:
+   ```python
+   @tool
+   def retrieve_kb_cached(
+       query: str,
+       config: RunnableConfig,
+       store: Annotated[BaseStore, InjectedStore()],
+   ) -> str:
+       user_id = config["configurable"]["user_id"]
+       hits = store.search(("subq_cache", user_id), query=query, limit=1)
+       if hits and hits[0].score >= 0.85:
+           return hits[0].value["chunks_blob"]   # CACHE HIT
+       # ... fall through to hybrid+rerank, then store.put(...) the result
+   ```
+3. **`pre_model_hook`** — runs before every LLM call. We use it to fetch all `prefs` + the top-3 semantically-relevant `facts` for the user's latest message, then prepend them as a `[memory]` system message. The same hook will host the kill-switches in Module 5.
+
+**Per-call context via `RunnableConfig`** — pass `config={"configurable": {"user_id": "alaap"}}` on `invoke`; tools read it to scope their reads/writes. Free multi-tenant.
+
+**mem0 — what it adds on top of `BaseStore`:**
+
+1. **LLM-driven write compression.** `mem.add(messages=...)` runs an internal LLM that extracts durable facts, dedupes against existing memories, and only updates what's new. mem0 claims ~80% prompt-token reduction for memory injections.
+2. **Scoped keys baked into the API** — every call takes `user_id`, optional `agent_id`, optional `session_id`. Same idea as namespace tuples, just first-class.
+3. **Optional graph memory** — Neo4j-backed entity/relation graph across stored facts. `PROJECT2_PLAN.md` keeps this off for v1.
+
+The ergonomic match between `BaseStore` and mem0 is why the capstone hides both behind a `MemoryBackend` Protocol — the swap is a few lines:
+
+```python
+# BaseStore
+store.put(("facts", "alaap"), key=..., value=...)
+store.search(("facts", "alaap"), query="...")
+
+# mem0
+mem.add(messages=..., user_id="alaap", metadata={"category": "facts"})
+mem.search("...", user_id="alaap", filters={"category": "facts"})
+```
+
+**Key takeaway:** every production agent uses BOTH layers — checkpointer for "this thread's working memory", store for "everything that should outlive this thread." Master `BaseStore`'s `put` / `get` / `search` + namespaces and you've understood 90% of what mem0 is doing under the hood. Module IV is now complete; Module V composes these RAG-aware memory-aware agents into multi-agent systems.
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -675,7 +919,7 @@ pip install langgraph langchain-google-genai langchain-tavily python-dotenv pyda
 
 Additional dependencies will be installed module-by-module as we introduce them:
 - Module III: `langchain` (for `create_react_agent`, `ToolNode`)
-- Module IV: `qdrant-client`, `langchain-qdrant`, `mem0ai`
+- Module IV: `qdrant-client`, `langchain-qdrant`, `rank_bm25`, `mem0ai`
 - Module V: `langfuse`, `langgraph-supervisor`
 
 ### Configure API keys
@@ -710,9 +954,13 @@ python src/deep_research/module_3_agent_patterns/09_react_from_scratch.py
 python src/deep_research/module_3_agent_patterns/10_prebuilt_react_agent.py
 python src/deep_research/module_3_agent_patterns/11_human_in_the_loop.py
 
-# Module IV — Stages 14, 15  (requires Qdrant on :6333)
+# Module IV — Stages 14, 15, 16, 17, 18, 19  (requires Qdrant on :6333)
 python src/deep_research/module_4_memory_and_rag/12_qdrant_basics.py
 python src/deep_research/module_4_memory_and_rag/13_naive_rag.py
+python src/deep_research/module_4_memory_and_rag/14_better_rag.py
+python src/deep_research/module_4_memory_and_rag/15_self_rag.py
+python src/deep_research/module_4_memory_and_rag/16_agentic_rag.py
+python src/deep_research/module_4_memory_and_rag/17_long_term_memory.py
 ```
 
 ---
@@ -771,10 +1019,10 @@ applied-langgraph/
 │       │   ├── README.md
 │       │   ├── 12_qdrant_basics.py          ✅
 │       │   ├── 13_naive_rag.py              ✅
-│       │   ├── 14_better_rag.py             📋
-│       │   ├── 15_self_rag.py               📋
-│       │   ├── 16_agentic_rag.py            📋
-│       │   └── 17_long_term_memory.py       📋
+│       │   ├── 14_better_rag.py             ✅
+│       │   ├── 15_self_rag.py               ✅
+│       │   ├── 16_agentic_rag.py            ✅
+│       │   └── 17_long_term_memory.py       ✅
 │       ├── module_5_multi_agent/            📋
 │       │   ├── 18_supervisor_pattern.py
 │       │   ├── 19_network_pattern.py

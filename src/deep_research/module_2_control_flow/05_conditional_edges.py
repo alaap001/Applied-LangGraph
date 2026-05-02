@@ -27,9 +27,9 @@ Graph topology (mermaid):
     ```mermaid
     flowchart LR
         S([START]) --> C[classify_query]
-        C -.route<br/>'simple'.-> A[simple_answer]
-        C -.route<br/>'needs_search'.-> W[web_search]
-        C -.route<br/>'harmful'.-> R[refuse]
+        C -.->|"route<br/>'simple'"| A[simple_answer]
+        C -.->|"route<br/>'needs_search'"| W[web_search]
+        C -.->|"route<br/>'harmful'"| R[refuse]
         A --> E([END])
         W --> E
         R --> E
@@ -41,7 +41,7 @@ The 3 return shapes of `add_conditional_edges` (unified mental model):
     flowchart TB
         subgraph Branch["routing fn returns STRING<br/>= branching (this stage)"]
             B1[node A] -->|"'next_b'"| B2[node B]
-            B1 -. or .->|"'next_c'"| B3[node C]
+            B1 -.->|"or 'next_c'"| B3[node C]
         end
         subgraph Multi["routing fn returns LIST OF STRINGS<br/>= multi-target (rare)"]
             M1[node A] --> M2[node B]
@@ -58,9 +58,9 @@ Two-role separation (classifier writes, router reads):
 
     ```mermaid
     flowchart LR
-        C[classify_query<br/>NODE - does work] -->|writes| ST[(state.route)]
-        ST -->|reads| RT[route_after_classify<br/>ROUTER - pure fn]
-        RT -->|returns string| EDGE{conditional edge}
+        C["classify_query<br/>NODE - does work"] -->|"writes"| ST[("state.route")]
+        ST -->|"reads"| RT["route_after_classify<br/>ROUTER - pure fn"]
+        RT -->|"returns string"| EDGE{"conditional edge"}
     ```
 
 The classify_query node uses an LLM with structured output to label
@@ -144,7 +144,7 @@ def classify_query(state: RoutingState) -> dict:
     result: QueryClassification = classifier_llm.invoke(
         f"Classify this user query: {query}"
     )
-    print(f"[classify] -> {result.label}")
+    print(f"[classify] -> {result}")
     return {"route": result.label}
 
 

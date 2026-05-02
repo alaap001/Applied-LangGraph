@@ -129,7 +129,7 @@ load_dotenv()
 assert os.getenv("GOOGLE_API_KEY"), "GOOGLE_API_KEY missing from .env"
 assert os.getenv("TAVILY_API_KEY"), "TAVILY_API_KEY missing from .env"
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview")
 tavily = TavilySearch(max_results=2, search_depth="basic")
 
 MAX_CRITIC_ROUNDS = 2  # the kill-switch from PROJECT2_PLAN.md
@@ -240,6 +240,7 @@ def critic_node(
     print(f"[critic] reviewing findings (round {round_num})")
 
     findings_block = "\n".join(state["findings"]) or "(empty)"
+    
     verdict: CriticVerdict = critic_llm.invoke(
         "You are a research critic. Decide if the findings sufficiently "
         "answer the original query.\n\n"
@@ -306,7 +307,7 @@ builder.add_edge("searcher", "critic")
 builder.add_edge("synthesize", END)
 
 graph = builder.compile()
-
+graph.get_graph().draw_mermaid_png(output_file_path="cycle_command.png")
 
 # ---------------------------------------------------------------------------
 # 7. RUN
